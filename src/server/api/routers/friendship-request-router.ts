@@ -65,6 +65,35 @@ export const friendshipRequestRouter = router({
     .use(canSendFriendshipRequest)
     .input(SendFriendshipRequestInputSchema)
     .mutation(async ({ ctx, input }) => {
+      const existingFriendship = await ctx.db
+        .selectFrom('friendships')
+        .where('userId', '=', ctx.session.userId)
+        .where('friendUserId', '=', input.friendUserId)
+        .selectAll()
+        .executeTakeFirst()
+
+      if (existingFriendship) {
+        // If a friendship request already exists with 'declined' status, update it to 'requested'
+        if (
+          existingFriendship.status ===
+          FriendshipStatusSchema.Values['declined']
+        ) {
+          await ctx.db
+            .updateTable('friendships')
+            .set({ status: FriendshipStatusSchema.Values['requested'] })
+            .where('userId', '=', ctx.session.userId)
+            .where('friendUserId', '=', input.friendUserId)
+            .execute()
+          return
+        }
+
+        // If a friendship request already exists with 'requested' or 'accepted' status, throw an error
+        throw new TRPCError({
+          code: 'BAD_REQUEST',
+          message: 'Friendship request already exists.',
+        })
+      }
+
       /**
        * Question 3: Fix bug
        *
@@ -79,6 +108,7 @@ export const friendshipRequestRouter = router({
        * scenario for Question 3
        *  - Run `yarn test` to verify your answer
        */
+      // If no previous friendship request exists, insert a new one with 'requested' status
       return ctx.db
         .insertInto('friendships')
         .values({
@@ -94,6 +124,40 @@ export const friendshipRequestRouter = router({
     .input(AnswerFriendshipRequestInputSchema)
     .mutation(async ({ ctx, input }) => {
       await ctx.db.transaction().execute(async (t) => {
+        // Step 1: Update the existing friendship request status to 'accepted'
+        await t
+          .updateTable('friendships')
+          .set({ status: FriendshipStatusSchema.Values['accepted'] })
+          .where('userId', '=', input.friendUserId)
+          .where('friendUserId', '=', ctx.session.userId)
+          .execute()
+
+        // Step 2: Check if the reverse friendship record already exists
+        const existingReverseFriendship = await t
+          .selectFrom('friendships')
+          .where('userId', '=', ctx.session.userId)
+          .where('friendUserId', '=', input.friendUserId)
+          .select('id')
+          .executeTakeFirst()
+
+        if (!existingReverseFriendship) {
+          // Only insert if no existing reverse friendship is found
+          await t
+            .insertInto('friendships')
+            .values({
+              userId: ctx.session.userId,
+              friendUserId: input.friendUserId,
+              status: FriendshipStatusSchema.Values['accepted'],
+            })
+            .execute()
+        } else {
+          await t
+            .updateTable('friendships')
+            .set({ status: FriendshipStatusSchema.Values['accepted'] })
+            .where('userId', '=', ctx.session.userId)
+            .where('friendUserId', '=', input.friendUserId)
+            .execute()
+        }
         /**
          * Question 1: Implement api to accept a friendship request
          *
@@ -124,6 +188,12 @@ export const friendshipRequestRouter = router({
     .use(canAnswerFriendshipRequest)
     .input(AnswerFriendshipRequestInputSchema)
     .mutation(async ({ ctx, input }) => {
+      await ctx.db
+        .updateTable('friendships')
+        .set({ status: FriendshipStatusSchema.Values['declined'] })
+        .where('userId', '=', input.friendUserId)
+        .where('friendUserId', '=', ctx.session.userId)
+        .execute()
       /**
        * Question 2: Implement api to decline a friendship request
        *
